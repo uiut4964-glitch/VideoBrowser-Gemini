@@ -65,18 +65,20 @@ import kotlin.math.abs
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
-// يبحث عن الفيديو الذي يُشغَّل فعليًا (الأكبر ظهورًا على الشاشة) ويتجاهل المعاينات
+// كشف الفيديو ومصادره ومدته فور فتح الصفحة دون اشتراط الضغط على زر التشغيل
 private const val SCAN_JS =
     "(function(){var vs=document.querySelectorAll('video'),best=null,bs=-1,others=[];" +
         "var vw=window.innerWidth,vh=window.innerHeight;" +
         "for(var i=0;i<vs.length;i++){var v=vs[i];if(!v.__vid)v.__vid=Math.random().toString(36).slice(2);" +
-        "var s0=v.currentSrc||v.src||'';var r=v.getBoundingClientRect();" +
+        "var s0=v.currentSrc||v.src||'';" +
+        "if(!s0){var srcTag=v.querySelector('source');if(srcTag)s0=srcTag.src||'';}" +
+        "var r=v.getBoundingClientRect();" +
         "var w=Math.max(0,Math.min(r.right,vw)-Math.max(r.left,0));" +
         "var h=Math.max(0,Math.min(r.bottom,vh)-Math.max(r.top,0));var area=w*h;" +
-        "var playing=!v.paused&&!v.ended&&v.readyState>2;" +
-        "if(area<1||(!playing&&!(v.currentTime>1))){if(s0)others.push(s0);continue;}" +
-        "var sc=area*(playing?4:1)*(v.muted?1:2);" +
-        "if(sc>bs){if(best&&best.src)others.push(best.src);bs=sc;best={id:v.__vid,src:s0,poster:v.poster||'',playing:playing};}" +
+        "var dur=v.duration||0;" +
+        "var playing=!v.paused&&!v.ended;" +
+        "var sc=Math.max(area,100)*(playing?3:1);" +
+        "if(sc>bs){if(best&&best.src)others.push(best.src);bs=sc;best={id:v.__vid,src:s0,poster:v.poster||'',duration:dur,playing:playing};}" +
         "else if(s0)others.push(s0);}" +
         "var og=document.querySelector('meta[property=\"og:image\"]');" +
         "return JSON.stringify({n:vs.length,a:best,o:others,og:og?og.content:''});})()"
@@ -335,7 +337,6 @@ class MainActivity : AppCompatActivity() {
         content = FrameLayout(this)
         root.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
-        // الزر العائم (بدون عداد أرقام نهائياً)
         fab = FrameLayout(this)
         fabIcon = ImageView(this).apply {
             setImageResource(R.drawable.ic_download)
@@ -345,7 +346,7 @@ class MainActivity : AppCompatActivity() {
         }
         fab.addView(fabIcon, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
         badge = TextView(this).apply {
-            visibility = View.GONE // إلغاء العداد الرقمي نهائياً
+            visibility = View.GONE
         }
         fab.addView(badge, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP or Gravity.END))
         content.addView(fab, FrameLayout.LayoutParams(dp(62), dp(62), Gravity.BOTTOM or Gravity.END).apply {
@@ -376,10 +377,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateFab() {
         val t = cur
-        // يتحول لونه إلى الأحمر فقط عند تشغيل الفيديو فعلياً (Active Playback)
-        val active = t != null && t.isActuallyPlaying && t.media.isNotEmpty()
-        (fabIcon.background as GradientDrawable).setColor(if (active) 0xFFE53935.toInt() else 0xFF78909C.toInt())
-        badge.visibility = View.GONE // تأكيد إخفاء العداد تماماً
+        val hasMedia = t != null && t.media.isNotEmpty()
+        (fabIcon.background as GradientDrawable).setColor(if (hasMedia) 0xFFE53935.toInt() else 0xFF78909C.toInt())
+        badge.visibility = View.GONE
     }
 
     private fun tabOf(w: WebView): Tab? = tabs.firstOrNull { it.web === w }
@@ -507,7 +507,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
                 val u = r.url.toString()
-                // استبعاد الإعلانات ومعاينات الفيديو من عملية التقاط الروابط
                 if ((MEDIA_REGEX.containsMatchIn(u) || u.contains("videoplayback")) && !Net.isAdOrPreview(u)) {
                     ui.post { tabOf(v)?.let { rec(it, u) } }
                 }
@@ -596,7 +595,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onScan(t: Tab, o: JSONObject) {
-        val n = o.optInt("n")
         val a = o.optJSONObject("a")
         val others = HashSet<String>()
         val oa = o.optJSONArray("o")
@@ -623,7 +621,6 @@ class MainActivity : AppCompatActivity() {
         t.poster = a.optString("poster").ifEmpty { o.optString("og") }
         t.media.clear()
 
-        // استبعاد الإعلانات أثناء الفحص
         if (src.startsWith("http") && !Net.isAdOrPreview(src)) {
             addTo(t, src)
         } else {
@@ -657,7 +654,7 @@ class MainActivity : AppCompatActivity() {
         if (t.media.isEmpty()) {
             toast(
                 if (t.sawBlob) "هذا الموقع يستخدم بثًا محميًا لا يمكن تحميله مباشرة"
-                else "لم أجد فيديو قيد التشغيل. شغّل الفيديو الذي تريده أولًا ثم اضغط الزر"
+                else "جاري تحضير روابط الفيديو..."
             )
             return
         }

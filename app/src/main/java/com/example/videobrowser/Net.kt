@@ -16,29 +16,18 @@ object Net {
     /** دالة محسنة وموسعة لتصفية واستبعاد الإعلانات وشبكات التتبع (Ad Block & Preroll Filter) */
     fun isAdOrPreview(url: String): Boolean {
         val lower = url.lowercase()
-        
-        // قائمة النطاقات والكلمات المفتاحية الشهيرة الخاصة بالإعلانات وشبكات التتبع
         val adDomainsOrKeywords = listOf(
             "ad.", "ads.", "adserver", "doubleclick", "googlesyndication",
             "googleads", "adnxs", "adsrvr", "taboola", "outbrain", "criteo",
             "pubmatic", "rubiconproject", "openx", "moatads", "zedo",
             "preroll", "advert", "promo", "preview", "thumb", "trailer",
             "banner", "pixel", "telemetry", "analytics", "popunder", "popup",
-            "ima.googlesv", "vast", "vpaid", "tracking", "click", "stats"
+            "ima.googlesv", "vast", "vpaid", "tracking", "click", "stats",
+            "/ads/", "/advert/", "/promo/", "/banner/", "/track/"
         )
-
         for (k in adDomainsOrKeywords) {
-            if (lower.contains(k)) {
-                return true
-            }
+            if (lower.contains(k)) return true
         }
-
-        // استبعاد المقاطع الصغيرة جداً أو الروابط المؤقتة التي لا تمثل فيديوهات حقيقية
-        val adPathPatterns = listOf("/ads/", "/advert/", "/promo/", "/banner/", "/track/")
-        for (pattern in adPathPatterns) {
-            if (lower.contains(pattern)) return true
-        }
-
         return false
     }
 
@@ -157,7 +146,7 @@ object Net {
         f.writeBytes(readBytes(url, headers))
     }
 
-    fn onWifi(c: Context): Boolean {
+    fun onWifi(c: Context): Boolean {
         val cm = c.getSystemService(ConnectivityManager::class.java) ?: return false
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||

@@ -67,18 +67,15 @@ import kotlin.math.abs
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
-// استبعاد الفيديوهات الصغيرة (مثل بانرات الإعلانات في رأس الصفحة) وحصر الفحص بالفيديوهات الكبيرة
 private const val SCAN_JS =
     "(function(){var vs=document.querySelectorAll('video'),best=null,bs=-1,others=[];" +
         "var vw=window.innerWidth,vh=window.innerHeight;" +
-        "for(var i=0;i<vs.length;i++){var v=vs[i];" +
+        "for(var i=0;i<vs.length;i++){var v=vs[i];if(!v.__vid)v.__vid=Math.random().toString(36).slice(2);" +
+        "var s0=v.currentSrc||v.src||'';" +
+        "if(!s0){var srcTag=v.querySelector('source');if(srcTag)s0=srcTag.src||'';}" +
         "var r=v.getBoundingClientRect();" +
         "var w=Math.max(0,Math.min(r.right,vw)-Math.max(r.left,0));" +
         "var h=Math.max(0,Math.min(r.bottom,vh)-Math.max(r.top,0));var area=w*h;" +
-        "if(area < 8000) continue;" + // تجاهل إعلانات البانر والصور المتحركة صغيرة المساحة
-        "if(!v.__vid)v.__vid=Math.random().toString(36).slice(2);" +
-        "var s0=v.currentSrc||v.src||'';" +
-        "if(!s0){var srcTag=v.querySelector('source');if(srcTag)s0=srcTag.src||'';}" +
         "var dur=v.duration||0;" +
         "var playing=!v.paused&&!v.ended;" +
         "var sc=Math.max(area,100)*(playing?3:1);" +
@@ -387,12 +384,13 @@ class MainActivity : AppCompatActivity() {
         val isResolving = t != null && t.isResolving
         
         val bgCol = when {
-            isResolving -> 0xFF1976D2.toInt()
-            hasMedia -> 0xFFE53935.toInt()
-            else -> 0xFF78909C.toInt()
+            isResolving -> 0xFF1976D2.toInt() // أزرق أثناء التحضير في الخلفية
+            hasMedia -> 0xFFE53935.toInt()      // أحمر جاهز
+            else -> 0xFF78909C.toInt()          // رمادي افتراضي
         }
         (fabIcon.background as GradientDrawable).setColor(bgCol)
 
+        // حركة دائرية خفيفة للزر أثناء التحضير
         if (isResolving) {
             val anim = RotateAnimation(0f, 360f, Animation.RELATIVE_TO_SELF, 0.5f, Animation.RELATIVE_TO_SELF, 0.5f).apply {
                 duration = 1000
@@ -603,6 +601,7 @@ class MainActivity : AppCompatActivity() {
     private fun addTo(t: Tab, url: String) {
         if (!Net.isAdOrPreview(url)) {
             t.media[url] = MediaItem(url, if (url.contains(".m3u8", true)) "hls" else "direct")
+            // بدء تجهيز وتحضير الروابط والجودات العالية في الخلفية فور اكتشاف الرابط
             triggerBackgroundResolve(t)
         }
     }
@@ -648,13 +647,7 @@ class MainActivity : AppCompatActivity() {
         t.poster = a.optString("poster").ifEmpty { o.optString("og") }
         t.media.clear()
 
-        // إعطاء الأولوية المطلقة لروابط HLS (.m3u8) المكتشفة من الشبكة لأنها تحتوي على الجودات العالية المخفية
-        val hlsCandidates = t.sniffed.keys.filter { it.contains(".m3u8", true) && !Net.isAdOrPreview(it) }
-        if (hlsCandidates.isNotEmpty()) {
-            for (u in hlsCandidates) {
-                addTo(t, u)
-            }
-        } else if (src.startsWith("http") && !Net.isAdOrPreview(src)) {
+        if (src.startsWith("http") && !Net.isAdOrPreview(src)) {
             addTo(t, src)
         } else {
             if (src.startsWith("blob:")) t.sawBlob = true
@@ -668,6 +661,7 @@ class MainActivity : AppCompatActivity() {
         updateFab()
     }
 
+    // تجهيز الصيغ والجودات العالية (حتى 2160p) في الخلفية تلقائياً
     private fun triggerBackgroundResolve(t: Tab) {
         if (t.isResolving || t.resolvedFormats != null || t.media.isEmpty()) return
         t.isResolving = true
@@ -728,11 +722,13 @@ class MainActivity : AppCompatActivity() {
         val poster = t.poster
         val headers = headersFor(t)
 
+        // إذا كانت القائمة مجهزة مسبقاً في الخلفية، افتحها فوراً دون أي انتظار
         if (t.resolvedFormats != null && t.resolvedFormats!!.isNotEmpty()) {
             showFormatSheet(t.resolvedFormats!!, headers, title, poster)
             return
         }
 
+        // وإلا قم بتحضيرها وعرضها فوراً
         toast("جارٍ جلب الصيغ المتاحة...")
         val items = t.media.values.toList()
         io.execute {

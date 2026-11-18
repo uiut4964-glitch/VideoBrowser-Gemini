@@ -22,17 +22,15 @@ object Formats {
         }
     }
 
-    /** اسم الجودة بالأسلوب المعتاد مع دعم الدقات العالية جداً */
+    /** اسم الجودة بالأسلوب المعتاد: 720P HD ... */
     fun qualityLabel(w: Int, h: Int): String {
         val s = minOf(w, h)
         return when {
-            s >= 2000 || h >= 2000 -> "2160P 4K"
-            s >= 1300 || h >= 1400 -> "1440P 2K"
-            s >= 1000 || h >= 1080 -> "1080P HD"
-            s >= 700 || h >= 720 -> "720P HD"
-            s >= 450 || h >= 480 -> "480P"
-            s >= 300 || h >= 360 -> "360P"
-            else -> if (s > 0) s.toString() + "P" else h.toString() + "P"
+            s >= 2000 -> "2160P 4K"
+            s >= 1300 -> "1440P 2K"
+            s >= 1000 -> "1080P HD"
+            s >= 700 -> "720P HD"
+            else -> s.toString() + "P"
         }
     }
 
@@ -95,11 +93,7 @@ object Formats {
                     var w = 0
                     var hh = 0
                     val rs = v.resolution.split('x')
-                    if (rs.size == 2) { 
-                        w = rs[0].toIntOrNull() ?: 0 
-                        hh = rs[1].toIntOrNull() ?: 0 
-                    }
-                    
+                    if (rs.size == 2) { w = rs[0].toIntOrNull() ?: 0; hh = rs[1].toIntOrNull() ?: 0 }
                     try {
                         if (hh > 0) {
                             val m = Hls.parseMedia(Net.fetchText(v.url, h), v.url)
@@ -107,24 +101,21 @@ object Formats {
                             val bps = if (v.avg > 0) v.avg else v.bandwidth
                             if (dur > 0 && bps > 0) est = (bps / 8 * dur).toLong()
                         } else {
-                            // إذا كانت الدقة غير موجودة في الـ Master، نقوم بفحص البث لاستخراج الأبعاد الحقيقية المخفية
                             val inf = mediaInfo(v.url, h, true)
                             dur = inf.duration; est = inf.bytes; w = inf.w; hh = inf.h
                         }
                     } catch (e: Exception) {
                     }
                     
-                    // استخراج التسمية بناءً على الأبعاد الحقيقية المستخرجة لضمان ظهور الجودات العالية
-                    val rawLabel = if (hh > 0) qualityLabel(w, hh) else ""
-                    val label = sanitizeLabel(rawLabel)
+                    val rawLabel = if (hh > 0) qualityLabel(w, hh)
+                    else "جودة " + String.format(Locale.US, "%.1f Mbps", v.bandwidth / 1_000_000.0)
                     
-                    // إذا لم نتمكن من استخراج الأبعاد، نتخطي الرابط لتجنب قيم الـ Mbps العشوائية
-                    if (label.isEmpty()) continue
+                    val label = sanitizeLabel(rawLabel)
+                    if (label.isEmpty()) continue // تخطي التسميات غير المرغوبة التي تحتوي على سرعات Mbps
 
                     if (est <= 0 && v.bandwidth > 0 && dur > 0) est = (v.bandwidth / 8 * dur).toLong()
-                    out.add(Format(label, if (w > 0 && hh > 0) "${w}x$hh" else v.resolution, v.url, "hls", "ts", true, fmtEst(est), false, dur, est))
+                    out.add(Format(label, v.resolution, v.url, "hls", "ts", true, fmtEst(est), false, dur, est))
                 }
-                
                 for (a in Hls.parseAudio(text, item.url).take(3)) {
                     var est = -1L
                     var dur = 0.0
@@ -138,9 +129,12 @@ object Formats {
             } else {
                 val inf = mediaInfo(item.url, h, true)
                 val m0 = Hls.parseMedia(text, item.url)
-                val rawLabel = if (inf.h > 0) qualityLabel(inf.w, inf.h) else ""
-                val label = sanitizeLabel(rawLabel)
+                val rawLabel = if (inf.h > 0) qualityLabel(inf.w, inf.h)
+                else if (inf.bytes > 0 && inf.duration > 0)
+                    "جودة " + String.format(Locale.US, "%.1f Mbps", inf.bytes * 8 / inf.duration / 1_000_000.0)
+                else "جودة غير معروفة"
                 
+                val label = sanitizeLabel(rawLabel)
                 if (label.isNotEmpty()) {
                     out.add(
                         Format(

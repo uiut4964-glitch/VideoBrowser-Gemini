@@ -34,6 +34,15 @@ object Formats {
         }
     }
 
+    /** تصفية التسميات الوهمية أو المرتبطة بالـ Bandwidth لمنع ظهور قيم الـ Mbps الخاطئة */
+    private fun sanitizeLabel(rawLabel: String): String {
+        val lower = rawLabel.lowercase()
+        if (lower.contains("mbps") || lower.contains("kbps") || lower.contains("bandwidth")) {
+            return ""
+        }
+        return rawLabel
+    }
+
     private fun fmtEst(bytes: Long): String = if (bytes > 0) "≈ " + Util.fmtSize(bytes) else ""
 
     /** يقرأ قائمة المقاطع، ويقدّر الحجم من أول مقطع، ويستخرج الأبعاد إن طُلب */
@@ -97,8 +106,13 @@ object Formats {
                         }
                     } catch (e: Exception) {
                     }
-                    val label = if (hh > 0) qualityLabel(w, hh)
+                    
+                    val rawLabel = if (hh > 0) qualityLabel(w, hh)
                     else "جودة " + String.format(Locale.US, "%.1f Mbps", v.bandwidth / 1_000_000.0)
+                    
+                    val label = sanitizeLabel(rawLabel)
+                    if (label.isEmpty()) continue // تخطي التسميات غير المرغوبة التي تحتوي على سرعات Mbps
+
                     if (est <= 0 && v.bandwidth > 0 && dur > 0) est = (v.bandwidth / 8 * dur).toLong()
                     out.add(Format(label, v.resolution, v.url, "hls", "ts", true, fmtEst(est), false, dur, est))
                 }
@@ -115,16 +129,20 @@ object Formats {
             } else {
                 val inf = mediaInfo(item.url, h, true)
                 val m0 = Hls.parseMedia(text, item.url)
-                val label = if (inf.h > 0) qualityLabel(inf.w, inf.h)
+                val rawLabel = if (inf.h > 0) qualityLabel(inf.w, inf.h)
                 else if (inf.bytes > 0 && inf.duration > 0)
                     "جودة " + String.format(Locale.US, "%.1f Mbps", inf.bytes * 8 / inf.duration / 1_000_000.0)
                 else "جودة غير معروفة"
-                out.add(
-                    Format(
-                        label, inf.w.toString() + "x" + inf.h, item.url, "hls",
-                        if (m0.init != null) "mp4" else "ts", false, fmtEst(inf.bytes), false, inf.duration
+                
+                val label = sanitizeLabel(rawLabel)
+                if (label.isNotEmpty()) {
+                    out.add(
+                        Format(
+                            label, inf.w.toString() + "x" + inf.h, item.url, "hls",
+                            if (m0.init != null) "mp4" else "ts", false, fmtEst(inf.bytes), false, inf.duration
+                        )
                     )
-                )
+                }
             }
         } else {
             val p = Net.probe(item.url, h)

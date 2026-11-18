@@ -13,24 +13,25 @@ object Net {
     class Probe(val total: Long, val rangeOk: Boolean, val mime: String)
     data class ContentRange(val start: Long, val end: Long, val total: Long)
 
-    /** دالة تصفية واستبعاد الإعلانات، المقاطع المقطعة (Chunks/Segments)، ومعاينات الفيديو */
+    /** دالة تصفية واستبعاد الإعلانات، البانرات، ومعاينات الفيديو بدقة تامة */
     fun isAdOrPreview(url: String): Boolean {
         val lower = url.lowercase()
-        // استبعاد ملفات النقل والقطع والتدفقات الفرعية والإعلانات والمعاينات بدقة تامة
         if (lower.contains(".ts") || lower.contains("/seg-") || lower.contains("/chunk") ||
             lower.contains("segment") || lower.contains("frag") || lower.contains("fragment") ||
             lower.contains(".vtt") || lower.contains(".srt") || lower.contains("subtitles")) {
             return true
         }
-        val adKeywords = listOf("ad", "ads", "preroll", "advert", "promo", "preview", "thumb", "trailer", "banner", "pixel")
+        val adKeywords = listOf("ad", "ads", "advert", "advertisement", "promo", "preview", "thumb", "trailer", "banner", "pixel", "sponsor", "commercial", "preroll", "midroll", "postroll")
         for (k in adKeywords) {
-            if (lower.contains("-$k-") || lower.contains("/$k/") || lower.contains("=$k") || lower.contains("/$k?") || lower.contains("?$k=")) {
+            if (lower.contains("/$k/") || lower.contains("-$k-") || lower.contains("=$k") || 
+                lower.contains("/$k?") || lower.contains("?$k=") || lower.contains(".$k?") ||
+                lower.startsWith("$k/") || lower.contains("/ads?") || lower.contains("adtype")) {
                 return true
             }
         }
-        if (!lower.contains(".m3u8") && !lower.contains(".mpd")) {
-            for (k in listOf("ad", "preroll", "preview", "thumb", "trailer")) {
-                if (lower.contains(k)) return true
+        if (!lower.contains(".m3u8") && !lower.contains(".mpd") && !lower.contains("videoplayback")) {
+            if (lower.contains("banner") || lower.contains("promo") || lower.contains("sponsor") || lower.contains("/ad/")) {
+                return true
             }
         }
         return false

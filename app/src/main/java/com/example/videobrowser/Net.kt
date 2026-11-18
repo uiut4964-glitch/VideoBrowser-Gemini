@@ -13,25 +13,18 @@ object Net {
     class Probe(val total: Long, val rangeOk: Boolean, val mime: String)
     data class ContentRange(val start: Long, val end: Long, val total: Long)
 
-    /** دالة تصفية واستبعاد الإعلانات، البانرات، ومعاينات الفيديو بدقة تامة */
+    /** دالة تصفية واستبعاد الإعلانات ومعاينات الفيديو (Preroll Ads & Previews) */
     fun isAdOrPreview(url: String): Boolean {
         val lower = url.lowercase()
-        if (lower.contains(".ts") || lower.contains("/seg-") || lower.contains("/chunk") ||
-            lower.contains("segment") || lower.contains("frag") || lower.contains("fragment") ||
-            lower.contains(".vtt") || lower.contains(".srt") || lower.contains("subtitles")) {
-            return true
-        }
-        val adKeywords = listOf("ad", "ads", "advert", "advertisement", "promo", "preview", "thumb", "trailer", "banner", "pixel", "sponsor", "commercial", "preroll", "midroll", "postroll")
+        val adKeywords = listOf("ad", "ads", "preroll", "advert", "promo", "preview", "thumb", "trailer", "banner", "pixel")
         for (k in adKeywords) {
-            if (lower.contains("/$k/") || lower.contains("-$k-") || lower.contains("=$k") || 
-                lower.contains("/$k?") || lower.contains("?$k=") || lower.contains(".$k?") ||
-                lower.startsWith("$k/") || lower.contains("/ads?") || lower.contains("adtype")) {
+            if (lower.contains("-$k-") || lower.contains("/$k/") || lower.contains("=$k") || lower.contains("/$k?") || lower.contains("?$k=")) {
                 return true
             }
         }
-        if (!lower.contains(".m3u8") && !lower.contains(".mpd") && !lower.contains("videoplayback")) {
-            if (lower.contains("banner") || lower.contains("promo") || lower.contains("sponsor") || lower.contains("/ad/")) {
-                return true
+        if (!lower.contains(".m3u8")) {
+            for (k in listOf("ad", "preroll", "preview", "thumb", "trailer")) {
+                if (lower.contains(k)) return true
             }
         }
         return false

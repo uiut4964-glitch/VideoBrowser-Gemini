@@ -23,6 +23,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.animation.Animation
+import android.view.animation.RotateAnimation
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
@@ -65,7 +67,6 @@ import kotlin.math.abs
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
-// كشف الفيديو ومصادره ومدته فور فتح الصفحة دون اشتراط الضغط على زر التشغيل
 private const val SCAN_JS =
     "(function(){var vs=document.querySelectorAll('video'),best=null,bs=-1,others=[];" +
         "var vw=window.innerWidth,vh=window.innerHeight;" +
@@ -93,7 +94,7 @@ private val MEDIA_REGEX = Regex(
 
 class MainActivity : AppCompatActivity() {
 
-    private class Tab(val web: WebView) {
+    class Tab(val web: WebView) {
         var title = "علامة تبويب جديدة"
         var url = ""
         var pending = false
@@ -105,6 +106,8 @@ class MainActivity : AppCompatActivity() {
         var playStart = 0L
         var poster = ""
         var lastForced = ""
+        var resolvedFormats: List<Format>? = null
+        var isResolving = false
     }
 
     private val tabs = ArrayList<Tab>()
@@ -378,7 +381,25 @@ class MainActivity : AppCompatActivity() {
     private fun updateFab() {
         val t = cur
         val hasMedia = t != null && t.media.isNotEmpty()
-        (fabIcon.background as GradientDrawable).setColor(if (hasMedia) 0xFFE53935.toInt() else 0xFF78909C.toInt())
+        val isResolving = t != null && t.isResolving
+        
+        val bgCol = when {
+            isResolving -> 0xFF1976D2.toInt() // أزرق أثناء التحضير في الخلفية
+            hasMedia -> 0xFFE53935.toInt()      // أحمر جاهز
+            else -> 0xFF78909C.toInt()          // رمادي افتراضي
+        }
+        (fabIcon.background as GradientDrawable).setColor(bgCol)
+
+        // حركة دائرية خفيفة للزر أثناء التحضير
+        if (isResolving) {
+            val anim = RotateAnimation(0f, 360f, Animation.RELATIVE_TO_SELF, 0.5f, Animation.RELATIVE_TO_SELF, 0.5f).apply {
+                duration = 1000
+                repeatCount = Animation.INFINITE
+            }
+            fabIcon.startAnimation(anim)
+        } else {
+            fabIcon.clearAnimation()
+        }
         badge.visibility = View.GONE
     }
 
@@ -494,6 +515,8 @@ class MainActivity : AppCompatActivity() {
                 t.isActuallyPlaying = false
                 t.sawBlob = false
                 t.poster = ""
+                t.resolvedFormats = null
+                t.isResolving = false
                 if (t === cur) { urlBar.setText(url); updateFab() }
             }
 
@@ -578,6 +601,8 @@ class MainActivity : AppCompatActivity() {
     private fun addTo(t: Tab, url: String) {
         if (!Net.isAdOrPreview(url)) {
             t.media[url] = MediaItem(url, if (url.contains(".m3u8", true)) "hls" else "direct")
+            // بدء تجهيز وتحضير الروابط والجودات العالية في الخلفية فور اكتشاف الرابط
+            triggerBackgroundResolve(t)
         }
     }
 
@@ -604,6 +629,7 @@ class MainActivity : AppCompatActivity() {
             t.activeId = null
             t.isActuallyPlaying = false
             t.media.clear()
+            t.resolvedFormats = null
             updateFab()
             return
         }
@@ -635,6 +661,39 @@ class MainActivity : AppCompatActivity() {
         updateFab()
     }
 
+    // تجهيز الصيغ والجودات العالية (حتى 2160p) في الخلفية تلقائياً
+    private fun triggerBackgroundResolve(t: Tab) {
+        if (t.isResolving || t.resolvedFormats != null || t.media.isEmpty()) return
+        t.isResolving = true
+        if (t === cur) updateFab()
+
+        val items = t.media.values.toList()
+        val headers = headersFor(t)
+
+        io.execute {
+            val list = ArrayList<Format>()
+            for (item in items) {
+                try { list.addAll(Formats.resolve(item, headers)) } catch (e: Exception) {}
+            }
+            val clean = list.filter { f -> !Net.isAdOrPreview(f.url) && (f.fromMaster || list.none { it.fromMaster && it.url == f.url }) }
+                .distinctBy { f -> 
+                    val resKey = f.label.replace(Regex("[^0-9P]"), "").uppercase()
+                    if (resKey.isNotEmpty()) resKey else f.url
+                }
+                .sortedByDescending { f ->
+                    f.label.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+                }
+
+            ui.post {
+                t.isResolving = false
+                if (clean.isNotEmpty()) {
+                    t.resolvedFormats = clean
+                }
+                if (t === cur) updateFab()
+            }
+        }
+    }
+
     private fun headersFor(t: Tab, w: WebView = t.web): Map<String, String> {
         val m = LinkedHashMap<String, String>()
         m["User-Agent"] = w.settings.userAgentString
@@ -651,24 +710,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun onFabClick() {
         val t = cur ?: return
-        if (t.media.isEmpty()) {
+        if (t.media.isEmpty() && t.resolvedFormats == null) {
             toast(
                 if (t.sawBlob) "هذا الموقع يستخدم بثًا محميًا لا يمكن تحميله مباشرة"
                 else "جاري تحضير روابط الفيديو..."
             )
             return
         }
-        toast("جارٍ جلب الصيغ المتاحة...")
-        val items = t.media.values.toList()
-        val headers = headersFor(t)
+
         val title = if (t.title.isBlank()) Util.host(t.url) else t.title
         val poster = t.poster
+        val headers = headersFor(t)
+
+        // إذا كانت القائمة مجهزة مسبقاً في الخلفية، افتحها فوراً دون أي انتظار
+        if (t.resolvedFormats != null && t.resolvedFormats!!.isNotEmpty()) {
+            showFormatSheet(t.resolvedFormats!!, headers, title, poster)
+            return
+        }
+
+        // وإلا قم بتحضيرها وعرضها فوراً
+        toast("جارٍ جلب الصيغ المتاحة...")
+        val items = t.media.values.toList()
         io.execute {
             val list = ArrayList<Format>()
             for (item in items) {
                 try { list.addAll(Formats.resolve(item, headers)) } catch (e: Exception) {}
             }
-            // تصفية دقيقة ومنع التكرار حسب الجودة (Resolution) مع ترتيب تنازلي من الأعلى للأقل
             val clean = list.filter { f -> !Net.isAdOrPreview(f.url) && (f.fromMaster || list.none { it.fromMaster && it.url == f.url }) }
                 .distinctBy { f -> 
                     val resKey = f.label.replace(Regex("[^0-9P]"), "").uppercase()
@@ -679,7 +746,12 @@ class MainActivity : AppCompatActivity() {
                 }
             ui.post {
                 if (isFinishing) return@post
-                if (clean.isEmpty()) toast("تعذر جلب معلومات الفيديو") else showFormatSheet(clean, headers, title, poster)
+                if (clean.isEmpty()) {
+                    toast("تعذر جلب معلومات الفيديو")
+                } else {
+                    t.resolvedFormats = clean
+                    showFormatSheet(clean, headers, title, poster)
+                }
             }
         }
     }

@@ -13,16 +13,22 @@ object Net {
     class Probe(val total: Long, val rangeOk: Boolean, val mime: String)
     data class ContentRange(val start: Long, val end: Long, val total: Long)
 
-    /** دالة تصفية واستبعاد الإعلانات ومعاينات الفيديو (Preroll Ads & Previews) */
+    /** دالة تصفية واستبعاد الإعلانات، المقاطع المقطعة (Chunks/Segments)، ومعاينات الفيديو */
     fun isAdOrPreview(url: String): Boolean {
         val lower = url.lowercase()
+        // استبعاد ملفات النقل والقطع والتدفقات الفرعية والإعلانات والمعاينات بدقة تامة
+        if (lower.contains(".ts") || lower.contains("/seg-") || lower.contains("/chunk") ||
+            lower.contains("segment") || lower.contains("frag") || lower.contains("fragment") ||
+            lower.contains(".vtt") || lower.contains(".srt") || lower.contains("subtitles")) {
+            return true
+        }
         val adKeywords = listOf("ad", "ads", "preroll", "advert", "promo", "preview", "thumb", "trailer", "banner", "pixel")
         for (k in adKeywords) {
             if (lower.contains("-$k-") || lower.contains("/$k/") || lower.contains("=$k") || lower.contains("/$k?") || lower.contains("?$k=")) {
                 return true
             }
         }
-        if (!lower.contains(".m3u8")) {
+        if (!lower.contains(".m3u8") && !lower.contains(".mpd")) {
             for (k in listOf("ad", "preroll", "preview", "thumb", "trailer")) {
                 if (lower.contains(k)) return true
             }

@@ -1,30 +1,25 @@
 package com.example.videobrowser
 
-import android.Manifest
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.text.InputType
-import android.text.TextUtils
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewOutlineProvider
-import android.view.animation.Animation
-import android.view.animation.RotateAnimation
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
@@ -35,37 +30,25 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.PopupWindow
-import android.widget.ProgressBar
-import android.widget.RadioButton
-import android.widget.ScrollView
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import com.google.android.material.bottomsheet.BottomSheetBehavior
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.Executors
-import kotlin.math.abs
-
-private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
-private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
 private const val SCAN_JS =
     "(function(){var vs=document.querySelectorAll('video'),best=null,bs=-1,others=[];" +
@@ -112,354 +95,238 @@ class MainActivity : AppCompatActivity() {
 
     private val tabs = ArrayList<Tab>()
     private var cur: Tab? = null
-    private lateinit var content: FrameLayout
-    private lateinit var urlBar: EditText
-    private lateinit var progress: ProgressBar
-    private lateinit var fab: FrameLayout
-    private lateinit var fabIcon: ImageView
-    private lateinit var badge: TextView
-    private lateinit var tabBtn: TextView
-    private val io = Executors.newCachedThreadPool()
+    private val io = Executors.newSingleThreadExecutor()
     private val ui = Handler(Looper.getMainLooper())
+
+    private lateinit var root: FrameLayout
+    private lateinit var webContainer: FrameLayout
+    private lateinit var urlBar: EditText
+    private lateinit var fab: FloatingActionButton
+    private lateinit var progress: ProgressBar
+    private lateinit var backBtn: ImageButton
+    private lateinit var fwdBtn: ImageButton
+    private lateinit var homeBtn: ImageButton
+    private lateinit var tabsBtn: ImageButton
+    private lateinit var downloadsBtn: ImageButton
+    private lateinit var moreBtn: ImageButton
+
     private var customView: View? = null
     private var customCb: WebChromeClient.CustomViewCallback? = null
-    private var desktop = false
-    private lateinit var defaultUa: String
-    private var pathView: TextView? = null
-    private var refreshId: String? = null
-    private lateinit var refreshBar: TextView
+    private var customContainer: FrameLayout? = null
 
-    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri != null) {
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (e: Exception) {
-            }
-            Prefs.setFolder(this, uri.toString())
-            pathView?.text = pathText()
-        }
-    }
-
-    private val listLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        val d = r.data
-        val u = d?.getStringExtra("url")
-        if (r.resultCode == RESULT_OK && d != null && u != null) {
-            if (d.getBooleanExtra("newTab", false)) newTab(u) else cur?.web?.loadUrl(u)
-        }
-    }
-
-    private fun refreshTask(): Task? = refreshId?.let { id -> DownloadCenter.tasks.firstOrNull { it.id == id } }
-
-    private fun clearRefresh() {
-        refreshId = null
-        refreshBar.visibility = View.GONE
-    }
-
-    private fun handleRefreshIntent(i: Intent?) {
-        if (i == null) return
-        val id = i.getStringExtra("refreshTask") ?: return
-        val page = i.getStringExtra("refreshUrl") ?: return
-        i.removeExtra("refreshTask")
-        val t = DownloadCenter.tasks.firstOrNull { it.id == id } ?: return
-        refreshId = id
-        refreshBar.text = "تحديث رابط «" + t.name + "»: شغّل نفس الفيديو ثم اضغط الزر الأحمر واختر نفس الجودة. (اضغط هنا للإلغاء)"
-        refreshBar.visibility = View.VISIBLE
-        newTab(page)
-    }
-
-    private fun openList(key: String) {
-        listLauncher.launch(Intent(this, HistoryActivity::class.java).putExtra("key", key))
-    }
-
-    private val scanLoop = object : Runnable {
+    private val scanHandler = Handler(Looper.getMainLooper())
+    private val scanRunnable = object : Runnable {
         override fun run() {
             cur?.let { scan(it) }
-            ui.postDelayed(this, 1000)
+            scanHandler.postDelayed(this, 1000)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        DownloadCenter.init(this)
-        defaultUa = WebSettings.getDefaultUserAgent(this).replace("; wv", "").replace(Regex(" Version/\\d+\\.\\d+"), "")
-        desktop = Prefs.desktop(this)
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        Store.init(this)
+
+        root = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#121212"))
         }
-        setContentView(buildUi())
-        CookieManager.getInstance().setAcceptCookie(true)
-        restoreTabs(intent?.data?.toString())
-        handleRefreshIntent(intent)
+        setContentView(root)
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            gravity = Gravity.CENTER_VERTICAL
+            id = View.generateViewId()
+        }
+
+        backBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_back)
+            background = null
+            setOnClickListener { cur?.let { if (it.web.canGoBack()) it.web.goBack() } }
+        }
+        fwdBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_forward)
+            background = null
+            setOnClickListener { cur?.let { if (it.web.canGoForward()) it.web.goForward() } }
+        }
+        homeBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_home)
+            background = null
+            setOnClickListener { cur?.web?.loadUrl(Prefs.home(this@MainActivity)) }
+        }
+
+        urlBar = EditText(this).apply {
+            hint = "ابحث أو اكتب رابط URL"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#888888"))
+            setBackgroundColor(Color.parseColor("#2C2C2C"))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            singleLine = true
+            imeOptions = EditorInfo.IME_ACTION_GO
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_GO || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    navigate(text.toString())
+                    true
+                } else false
+            }
+        }
+
+        topBar.addView(backBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+        topBar.addView(fwdBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+        topBar.addView(homeBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+        topBar.addView(urlBar, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8); marginEnd = dp(2) })
+
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            gravity = Gravity.CENTER
+            id = View.generateViewId()
+        }
+
+        tabsBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_tabs)
+            background = null
+            setOnClickListener { showTabsDialog() }
+        }
+        downloadsBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_download)
+            background = null
+            setOnClickListener { startActivity(Intent(this@MainActivity, DownloadsActivity::class.java)) }
+        }
+        moreBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_more)
+            background = null
+            setOnClickListener { showMoreMenu(it) }
+        }
+
+        val btnW = dp(48)
+        bottomBar.addView(tabsBtn, LinearLayout.LayoutParams(btnW, btnW, 1f))
+        bottomBar.addView(downloadsBtn, LinearLayout.LayoutParams(btnW, btnW, 1f))
+        bottomBar.addView(moreBtn, LinearLayout.LayoutParams(btnW, btnW, 1f))
+
+        webContainer = FrameLayout(this)
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressDrawable = ContextCompat.getDrawable(this@MainActivity, R.drawable.ic_fg) ?: progressDrawable
+        }
+
+        fab = FloatingActionButton(this).apply {
+            setImageResource(R.drawable.ic_download)
+            imageTintList = ContextCompat.getColorStateList(this@MainActivity, android.R.color.white)
+            backgroundTintList = ContextCompat.getColorStateList(this@MainActivity, android.R.color.holo_red_dark)
+            setOnClickListener { onFabClick() }
+            visibility = View.GONE
+        }
+
+        val layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        layoutParams.topMargin = dp(58)
+        layoutParams.bottomMargin = dp(56)
+
+        root.addView(webContainer, layoutParams)
+
+        val topParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58))
+        root.addView(topBar, topParams)
+
+        val progParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4))
+        progParams.topMargin = dp(54)
+        root.addView(progress, progParams)
+
+        val botParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56))
+        botParams.gravity = Gravity.BOTTOM
+        root.addView(bottomBar, botParams)
+
+        val fabParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        fabParams.gravity = Gravity.BOTTOM or Gravity.END
+        fabParams.marginEnd = dp(16)
+        fabParams.bottomMargin = dp(72)
+        root.addView(fab, fabParams)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (customView != null) { hideCustom(); return }
-                val t = cur
-                if (t != null && t.web.canGoBack()) t.web.goBack()
-                else if (t != null && tabs.size > 1) closeTab(t)
-                else finish()
+                if (customView != null) {
+                    hideCustomView()
+                    return
+                }
+                val w = cur?.web
+                if (w != null && w.canGoBack()) {
+                    w.goBack()
+                } else if (tabs.size > 1) {
+                    closeTab(cur!!)
+                } else {
+                    finish()
+                }
             }
         })
-        showLastCrash()
-    }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        val u = intent.data?.toString()
-        if (u != null) newTab(u)
-        handleRefreshIntent(intent)
+        val savedTabs = Store.get(this, "tabs")
+        if (savedTabs is List<*> && savedTabs.isNotEmpty()) {
+            for (item in savedTabs) {
+                if (item is Map<*, *>) {
+                    val title = item["first"] as? String ?: ""
+                    val url = item["second"] as? String ?: ""
+                    if (url.startsWith("http")) {
+                        newTab(url, false, title)
+                    }
+                }
+            }
+        }
+        if (tabs.isEmpty()) {
+            newTab(Prefs.home(this))
+        } else {
+            switchTab(tabs[0])
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        ui.post(scanLoop)
+        scanHandler.post(scanRunnable)
     }
 
     override fun onPause() {
-        ui.removeCallbacks(scanLoop)
-        saveTabs()
         super.onPause()
-    }
-
-    override fun onStop() {
-        saveTabs()
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        ui.removeCallbacksAndMessages(null)
-        content.removeAllViews()
-        tabs.forEach { it.web.destroy() }
-        super.onDestroy()
-    }
-
-    private fun saveTabs() {
+        scanHandler.removeCallbacks(scanRunnable)
         val kept = tabs.filter { it.url.startsWith("http") }
-        if (kept.isEmpty()) return
         Store.put(this, "tabs", kept.map { it.title to it.url })
-        getSharedPreferences("state", Context.MODE_PRIVATE).edit()
-            .putInt("cur", kept.indexOf(cur).coerceAtLeast(0)).apply()
     }
 
-    private fun restoreTabs(start: String?) {
-        val saved = Store.get(this, "tabs")
-        if (saved.isEmpty()) {
-            newTab(start ?: Prefs.home(this))
-            return
-        }
-        val idx = getSharedPreferences("state", Context.MODE_PRIVATE).getInt("cur", 0)
-        for (p in saved) newTab(p.second, false, p.first)
-        selectTab(tabs[idx.coerceIn(0, tabs.size - 1)])
-        if (start != null) newTab(start)
-    }
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    private fun showLastCrash() {
-        val f = File(filesDir, "crash.txt")
-        if (!f.exists()) return
-        val txt = try { f.readText() } catch (e: Exception) { return }
-        val sv = ScrollView(this)
-        sv.addView(TextView(this).apply { text = txt; textSize = 10f; setPadding(dp(16), dp(8), dp(16), dp(8)); setTextIsSelectable(true) })
-        AlertDialog.Builder(this)
-            .setTitle("حدث خطأ في التشغيل السابق")
-            .setView(sv)
-            .setPositiveButton("نسخ") { _, _ ->
-                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                    .setPrimaryClip(ClipData.newPlainText("crash", txt))
-                f.delete()
-            }
-            .setNegativeButton("إغلاق") { _, _ -> f.delete() }
-            .show()
-    }
-
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-
-    @SuppressLint("ClickableViewAccessibility")
-    private fun buildUi(): View {
-        val dark = 0xFF455A64.toInt()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-        }
-
-        val top = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(4), dp(6))
-            setBackgroundColor(0xFFF1F3F4.toInt())
-        }
-        tabBtn = TextView(this).apply {
-            text = "1"
-            gravity = Gravity.CENTER
-            textSize = 13f
-            setTextColor(dark)
-            background = rounded(Color.WHITE, 6, 0xFF607D8B.toInt())
-            setOnClickListener { showTabs() }
-        }
-        top.addView(tabBtn, LinearLayout.LayoutParams(dp(30), dp(30)))
-        urlBar = EditText(this).apply {
-            hint = "ابحث أو اكتب رابط URL"
-            setSingleLine()
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            imeOptions = EditorInfo.IME_ACTION_GO
-            textSize = 14f
-            textDirection = View.TEXT_DIRECTION_LTR
-            gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            background = rounded(Color.WHITE, 22)
-            setPadding(dp(14), 0, dp(14), 0)
-            setOnEditorActionListener { v, _, _ ->
-                go((v as EditText).text.toString())
-                true
-            }
-        }
-        top.addView(urlBar, LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(8); marginEnd = dp(2) })
-        top.addView(iconBtn(R.drawable.ic_more, dark, 8).apply { setOnClickListener { showMenu(it) } },
-            LinearLayout.LayoutParams(dp(40), dp(40)))
-        root.addView(top, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            visibility = View.GONE
-        }
-        root.addView(progress, LinearLayout.LayoutParams(MATCH, dp(3)))
-
-        refreshBar = TextView(this).apply {
-            textSize = 13f
-            setTextColor(0xFF5D4037.toInt())
-            setBackgroundColor(0xFFFFF3E0.toInt())
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            visibility = View.GONE
-            setOnClickListener { clearRefresh() }
-        }
-        root.addView(refreshBar, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        content = FrameLayout(this)
-        root.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
-
-        fab = FrameLayout(this)
-        fabIcon = ImageView(this).apply {
-            setImageResource(R.drawable.ic_download)
-            setPadding(dp(15), dp(15), dp(15), dp(15))
-            background = circle(0xFF78909C.toInt())
-            elevation = dp(6).toFloat()
-        }
-        fab.addView(fabIcon, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
-        badge = TextView(this).apply {
-            visibility = View.GONE
-        }
-        fab.addView(badge, FrameLayout.LayoutParams(dp(20), dp(20), Gravity.TOP or Gravity.END))
-        content.addView(fab, FrameLayout.LayoutParams(dp(62), dp(62), Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(dp(14), dp(14), dp(14), dp(24))
-        })
-        fab.setOnTouchListener(object : View.OnTouchListener {
-            var dx = 0f; var dy = 0f; var sx = 0f; var sy = 0f; var moved = false
-            override fun onTouch(v: View, e: MotionEvent): Boolean {
-                when (e.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        dx = v.x - e.rawX; dy = v.y - e.rawY; sx = e.rawX; sy = e.rawY; moved = false
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        if (abs(e.rawX - sx) > dp(6) || abs(e.rawY - sy) > dp(6)) moved = true
-                        if (moved) {
-                            v.x = (e.rawX + dx).coerceIn(0f, (content.width - v.width).toFloat())
-                            v.y = (e.rawY + dy).coerceIn(0f, (content.height - v.height).toFloat())
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> if (!moved) onFabClick()
-                }
-                return true
-            }
-        })
-
-        return root
-    }
-
-    private fun updateFab() {
-        val t = cur
-        val hasMedia = t != null && t.media.isNotEmpty()
-        val isResolving = t != null && t.isResolving
-        
-        val bgCol = when {
-            isResolving -> 0xFF1976D2.toInt() // أزرق أثناء التحضير في الخلفية
-            hasMedia -> 0xFFE53935.toInt()      // أحمر جاهز
-            else -> 0xFF78909C.toInt()          // رمادي افتراضي
-        }
-        (fabIcon.background as GradientDrawable).setColor(bgCol)
-
-        // حركة دائرية خفيفة للزر أثناء التحضير
-        if (isResolving) {
-            val anim = RotateAnimation(0f, 360f, Animation.RELATIVE_TO_SELF, 0.5f, Animation.RELATIVE_TO_SELF, 0.5f).apply {
-                duration = 1000
-                repeatCount = Animation.INFINITE
-            }
-            fabIcon.startAnimation(anim)
-        } else {
-            fabIcon.clearAnimation()
-        }
-        badge.visibility = View.GONE
-    }
-
-    private fun tabOf(w: WebView): Tab? = tabs.firstOrNull { it.web === w }
-
-    private fun newTab(url: String?, load: Boolean = true, title: String = "") {
+    private fun newTab(url: String?, load: Boolean = true, title: String = ""): Tab {
         val w = WebView(this)
-        setupWebView(w)
+        initWebView(w)
         val t = Tab(w)
+        if (title.isNotBlank()) t.title = title
+        if (url != null) t.url = url
         tabs.add(t)
-        if (load) {
-            selectTab(t)
-            if (url != null) w.loadUrl(url)
-        } else {
-            t.url = url ?: ""
-            if (title.isNotEmpty()) t.title = title
-            t.pending = true
-        }
-        tabBtn.text = tabs.size.toString()
+        webContainer.addView(w, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        switchTab(t)
+        if (load && url != null) w.loadUrl(url)
+        return t
     }
 
-    private fun selectTab(t: Tab) {
-        cur?.let { content.removeView(it.web); it.web.onPause() }
+    private fun switchTab(t: Tab) {
         cur = t
-        t.web.onResume()
-        content.addView(t.web, 0, FrameLayout.LayoutParams(MATCH, MATCH))
-        if (t.pending) {
-            t.pending = false
-            t.web.loadUrl(t.url)
+        for (x in tabs) {
+            x.web.visibility = if (x === t) View.VISIBLE else View.GONE
         }
         urlBar.setText(t.url)
-        tabBtn.text = tabs.size.toString()
-        progress.visibility = View.GONE
         updateFab()
     }
 
     private fun closeTab(t: Tab) {
-        val i = tabs.indexOf(t)
-        tabs.remove(t)
-        content.removeView(t.web)
+        webContainer.removeView(t.web)
         t.web.destroy()
-        if (cur === t) cur = null
-        if (tabs.isEmpty()) newTab(Prefs.home(this)) else if (cur == null) selectTab(tabs[minOf(i, tabs.size - 1)])
-        tabBtn.text = tabs.size.toString()
+        tabs.remove(t)
+        if (tabs.isEmpty()) {
+            finish()
+        } else {
+            switchTab(tabs.last())
+        }
     }
 
-    private fun showTabs() {
-        val names = tabs.mapIndexed { i, t -> "${i + 1}. " + t.title }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("علامات التبويب")
-            .setItems(names) { _, i -> selectTab(tabs[i]) }
-            .setPositiveButton("علامة جديدة") { _, _ -> newTab(Prefs.home(this)) }
-            .setNeutralButton("إغلاق الحالية") { _, _ -> cur?.let { closeTab(it) } }
-            .setNegativeButton("إلغاء", null)
-            .show()
-    }
-
-    private fun go(input: String) {
-        val s = input.trim()
-        if (s.isEmpty()) return
+    private fun navigate(s: String) {
         val url = when {
             s.startsWith("http://") || s.startsWith("https://") -> s
             s.contains(" ") || !s.contains(".") -> Prefs.searchUrl(this) + URLEncoder.encode(s, "UTF-8")
@@ -467,70 +334,56 @@ class MainActivity : AppCompatActivity() {
         }
         cur?.web?.loadUrl(url)
         urlBar.clearFocus()
-        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-            .hideSoftInputFromWindow(urlBar.windowToken, 0)
-    }
-
-    private fun applyUa(w: WebView) {
-        w.settings.userAgentString = if (desktop) DESKTOP_UA else defaultUa
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(urlBar.windowToken, 0)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView(w: WebView) {
+    private fun initWebView(w: WebView) {
         val s = w.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
-        s.mediaPlaybackRequiresUserGesture = true
-        s.useWideViewPort = true
-        s.loadWithOverviewMode = true
-        s.builtInZoomControls = true
-        s.displayZoomControls = false
-        s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        s.databaseEnabled = true
+        s.loadsImagesAutomatically = true
+        s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        s.mediaPlaybackRequiresUserGesture = false
+        s.setSupportMultipleWindows(false)
         s.javaScriptCanOpenWindowsAutomatically = false
-        applyUa(w)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+        s.userAgentString = if (Prefs.desktop(this)) DESKTOP_UA else s.userAgentString
 
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
                 val u = r.url.toString()
                 val host = r.url.host ?: ""
-                if (r.isForMainFrame && host.startsWith("accounts.") && host.endsWith("google.com")) {
-                    val t = tabOf(v)
-                    if (t != null && t.lastForced != u) {
-                        t.lastForced = u
-                        v.loadUrl(u, mapOf("X-Requested-With" to ""))
-                        return true
-                    }
+                if (u.startsWith("http://") || u.startsWith("https://")) {
+                    v.loadUrl(u, mapOf("X-Requested-With" to ""))
+                    return true
                 }
-                return !(u.startsWith("http://") || u.startsWith("https://") || u.startsWith("about:") ||
-                    u.startsWith("data:") || u.startsWith("blob:"))
+                return false
             }
 
             override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
-                val t = tabOf(v) ?: return
                 t.url = url
-                t.media.clear()
-                t.sniffed.clear()
-                t.activeId = null
-                t.isActuallyPlaying = false
                 t.sawBlob = false
-                t.poster = ""
+                t.media.clear()
+                t.activeId = null
                 t.resolvedFormats = null
-                t.isResolving = false
                 if (t === cur) { urlBar.setText(url); updateFab() }
             }
 
             override fun onPageFinished(v: WebView, url: String) {
-                val t = tabOf(v) ?: return
                 t.url = url
                 t.title = v.title ?: url
                 addHistory(t.title, url)
-                scan(t)
+                if (t === cur) urlBar.setText(url)
             }
 
             override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
                 val u = r.url.toString()
-                if ((MEDIA_REGEX.containsMatchIn(u) || u.contains("videoplayback") || u.contains(".m3u8")) && !Net.isAdOrPreview(u)) {
+                if (Net.isAdOrPreview(u)) {
+                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
+                }
+                if ((MEDIA_REGEX.containsMatchIn(u) || u.contains("videoplayback") || u.contains(".m3u8"))) {
                     ui.post { tabOf(v)?.let { rec(it, u) } }
                 }
                 return null
@@ -549,35 +402,47 @@ class MainActivity : AppCompatActivity() {
                 if (title != null) tabOf(v)?.title = title
             }
 
-            override fun onShowCustomView(view: View, cb: WebChromeClient.CustomViewCallback) {
-                if (customView != null) { cb.onCustomViewHidden(); return }
+            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                if (customView != null) {
+                    callback?.onCustomViewHidden()
+                    return
+                }
                 customView = view
-                customCb = cb
-                view.setBackgroundColor(Color.BLACK)
-                (window.decorView as ViewGroup).addView(view, ViewGroup.LayoutParams(MATCH, MATCH))
+                customCb = callback
+                val decor = window.decorView as FrameLayout
+                customContainer = FrameLayout(this@MainActivity).apply {
+                    setBackgroundColor(Color.BLACK)
+                    addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER))
+                }
+                decor.addView(customContainer, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
                 WindowCompat.getInsetsController(window, window.decorView).hide(WindowInsetsCompat.Type.systemBars())
             }
 
-            override fun onHideCustomView() { hideCustom() }
+            override fun onHideCustomView() {
+                hideCustomView()
+            }
         }
 
         w.setDownloadListener { url, _, cd, mime, len ->
             if (url.startsWith("blob:") || url.startsWith("data:")) {
-                toast("هذا النوع من الروابط لا يمكن تحميله مباشرة")
-            } else {
-                val fname = URLUtil.guessFileName(url, cd, mime)
-                val ext = fname.substringAfterLast('.', "bin")
-                val t = cur
-                val f = Format("الملف", "", url, "direct", ext, false, if (len > 0) Util.fmtSize(len) else "")
-                showFormatSheet(listOf(f), if (t != null) headersFor(t, w) else emptyMap(), fname.substringBeforeLast('.'), "")
+                Toast.makeText(this, "لا يمكن تنزيل روابط Blob مباشرة", Toast.LENGTH_SHORT).show()
+                return@setDownloadListener
             }
+            val fname = URLUtil.guessFileName(url, cd, mime)
+            val ext = Formats.extOf(url, mime)
+            val f = Format("الملف", "", url, "direct", ext, false, if (len > 0) Util.fmtSize(len) else "")
+            showFormatDialog(listOf(f), fname, "")
         }
     }
 
-    private fun hideCustom() {
-        val v = customView ?: return
-        (window.decorView as ViewGroup).removeView(v)
+    private fun hideCustomView() {
+        if (customView == null) return
+        val decor = window.decorView as FrameLayout
+        decor.removeView(customContainer)
+        customContainer = null
         customView = null
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         customCb?.onCustomViewHidden()
         customCb = null
         WindowCompat.getInsetsController(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
@@ -601,7 +466,6 @@ class MainActivity : AppCompatActivity() {
     private fun addTo(t: Tab, url: String) {
         if (!Net.isAdOrPreview(url)) {
             t.media[url] = MediaItem(url, if (url.contains(".m3u8", true)) "hls" else "direct")
-            // بدء تجهيز وتحضير الروابط والجودات العالية في الخلفية فور اكتشاف الرابط
             triggerBackgroundResolve(t)
         }
     }
@@ -661,7 +525,6 @@ class MainActivity : AppCompatActivity() {
         updateFab()
     }
 
-    // تجهيز الصيغ والجودات العالية (حتى 2160p) في الخلفية تلقائياً
     private fun triggerBackgroundResolve(t: Tab) {
         if (t.isResolving || t.resolvedFormats != null || t.media.isEmpty()) return
         t.isResolving = true
@@ -680,57 +543,59 @@ class MainActivity : AppCompatActivity() {
                     val resKey = f.label.replace(Regex("[^0-9P]"), "").uppercase()
                     if (resKey.isNotEmpty()) resKey else f.url
                 }
-                .sortedByDescending { f ->
-                    f.label.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
-                }
+
+            val finalFormats = clean.sortedWith(compareByDescending<Format> { it.isAudio }.thenByDescending {
+                it.resolution.substringBefore('x').toIntOrNull() ?: 0
+            })
 
             ui.post {
                 t.isResolving = false
-                if (clean.isNotEmpty()) {
-                    t.resolvedFormats = clean
-                }
+                t.resolvedFormats = finalFormats
                 if (t === cur) updateFab()
             }
         }
     }
 
-    private fun headersFor(t: Tab, w: WebView = t.web): Map<String, String> {
-        val m = LinkedHashMap<String, String>()
-        m["User-Agent"] = w.settings.userAgentString
+    private fun headersFor(t: Tab): Map<String, String> {
+        val m = HashMap<String, String>()
         if (t.url.startsWith("http")) {
             m["Referer"] = t.url
             try {
                 val u = URL(t.url)
-                m["Origin"] = u.protocol + "://" + u.host
-            } catch (e: Exception) {
-            }
+                m["Origin"] = "${u.protocol}://${u.host}"
+            } catch (e: Exception) {}
         }
+        val ck = CookieManager.getInstance().getCookie(t.url)
+        if (ck != null) m["Cookie"] = ck
+        m["User-Agent"] = if (Prefs.desktop(this)) DESKTOP_UA else cur?.web?.settings?.userAgentString ?: DESKTOP_UA
         return m
+    }
+
+    private fun updateFab() {
+        val t = cur
+        if (t == null) {
+            fab.visibility = View.GONE
+            return
+        }
+        val hasMedia = t.media.isNotEmpty() || (t.resolvedFormats != null && t.resolvedFormats!!.isNotEmpty())
+        fab.visibility = if (hasMedia || t.isResolving) View.VISIBLE else View.GONE
     }
 
     private fun onFabClick() {
         val t = cur ?: return
-        if (t.media.isEmpty() && t.resolvedFormats == null) {
-            toast(
-                if (t.sawBlob) "هذا الموقع يستخدم بثًا محميًا لا يمكن تحميله مباشرة"
-                else "جاري تحضير روابط الفيديو..."
-            )
-            return
-        }
-
+        val items = t.media.values.toList()
+        val headers = headersFor(t)
         val title = if (t.title.isBlank()) Util.host(t.url) else t.title
         val poster = t.poster
-        val headers = headersFor(t)
 
-        // إذا كانت القائمة مجهزة مسبقاً في الخلفية، افتحها فوراً دون أي انتظار
-        if (t.resolvedFormats != null && t.resolvedFormats!!.isNotEmpty()) {
-            showFormatSheet(t.resolvedFormats!!, headers, title, poster)
+        if (t.resolvedFormats != null) {
+            showFormatDialog(t.resolvedFormats!!, title, poster)
             return
         }
 
-        // وإلا قم بتحضيرها وعرضها فوراً
-        toast("جارٍ جلب الصيغ المتاحة...")
-        val items = t.media.values.toList()
+        val pd = AlertDialog.Builder(this).setMessage("جاري فحص الجودات...").setCancelable(false).create()
+        pd.show()
+
         io.execute {
             val list = ArrayList<Format>()
             for (item in items) {
@@ -741,400 +606,297 @@ class MainActivity : AppCompatActivity() {
                     val resKey = f.label.replace(Regex("[^0-9P]"), "").uppercase()
                     if (resKey.isNotEmpty()) resKey else f.url
                 }
-                .sortedByDescending { f ->
-                    f.label.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
-                }
+
+            val finalFormats = clean.sortedWith(compareByDescending<Format> { it.isAudio }.thenByDescending {
+                it.resolution.substringBefore('x').toIntOrNull() ?: 0
+            })
+
             ui.post {
-                if (isFinishing) return@post
-                if (clean.isEmpty()) {
-                    toast("تعذر جلب معلومات الفيديو")
-                } else {
-                    t.resolvedFormats = clean
-                    showFormatSheet(clean, headers, title, poster)
-                }
+                pd.dismiss()
+                t.resolvedFormats = finalFormats
+                showFormatDialog(finalFormats, title, poster)
             }
         }
     }
 
-    private fun pathText(): String {
-        val f = Prefs.folder(this)
-        return "المسار: " + (if (f == null) "Download/VideoBrowser" else (Uri.parse(f).lastPathSegment ?: f))
-    }
-
-    private fun playPreview(f: Format, headers: Map<String, String>, title: String) {
-        val m = LinkedHashMap<String, String>(headers)
-        try {
-            val ck = CookieManager.getInstance().getCookie(f.url)
-            if (ck != null && !m.containsKey("Cookie")) m["Cookie"] = ck
-        } catch (e: Exception) {
-        }
-        val h = ArrayList<String>()
-        for ((k, v) in m) { h.add(k); h.add(v) }
-        startActivity(
-            Intent(this, PlayerActivity::class.java)
-                .putExtra("uris", arrayOf(f.url))
-                .putExtra("names", arrayOf(title))
-                .putExtra("headers", h.toTypedArray())
-                .putExtra("hls", f.kind == "hls")
-                .putExtra("ext", f.ext)
-        )
-    }
-
-    private fun showFormatSheet(list: List<Format>, headers: Map<String, String>, title: String, poster: String) {
-        val dlg = BottomSheetDialog(this)
-        val gray = 0xFF78909C.toInt()
-        val red = 0xFFE53935.toInt()
-        val outer = FrameLayout(this).apply {
-            setBackgroundColor(Color.WHITE)
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-        }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
-        outer.addView(root, FrameLayout.LayoutParams(MATCH, WRAP))
-
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val tf = FrameLayout(this).apply {
-            background = rounded(0xFF263238.toInt(), 6)
-            clipToOutline = true
-            outlineProvider = ViewOutlineProvider.BACKGROUND
-        }
-        val firstKind = Util.kindOf("x." + list[0].ext)
-        val thumb = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER
-            setImageResource(
-                when (firstKind) {
-                    "apk" -> R.drawable.ic_apk
-                    "audio" -> R.drawable.ic_music
-                    "video" -> R.drawable.ic_video
-                    else -> R.drawable.ic_file
-                }
-            )
-            setColorFilter(if (firstKind == "apk") 0xFF43A047.toInt() else 0xFF90A4AE.toInt())
-        }
-        tf.addView(thumb, FrameLayout.LayoutParams(MATCH, MATCH))
-        val maxDur = list.maxOfOrNull { it.durSec } ?: 0.0
-        if (maxDur > 0) {
-            tf.addView(TextView(this).apply {
-                text = Util.fmtDur(maxDur)
-                textSize = 11f
-                setTextColor(Color.WHITE)
-                background = rounded(0xAA000000.toInt(), 4)
-                setPadding(dp(5), dp(1), dp(5), dp(1))
-            }, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.END).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) })
-        }
-        head.addView(tf, LinearLayout.LayoutParams(dp(120), dp(86)))
-        val infoCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        infoCol.addView(TextView(this).apply {
-            text = "الشبكة: " + (if (Net.onWifi(this@MainActivity)) "WiFi" else "بيانات الجوال")
-            textSize = 12f
-            setTextColor(gray)
-        })
-        val et = EditText(this).apply {
-            setText(title)
-            textSize = 15f
-            maxLines = 3
-            background = null
-            setPadding(0, dp(2), 0, dp(2))
-            setTextColor(Color.BLACK)
-        }
-        infoCol.addView(et)
-        infoCol.addView(TextView(this).apply {
-            text = "مشاركة"
-            textSize = 13f
-            setTextColor(0xFF455A64.toInt())
-            background = rounded(0xFFF1F3F4.toInt(), 18)
-            setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_share, 0, 0, 0)
-            compoundDrawableTintList = android.content.res.ColorStateList.valueOf(gray)
-            compoundDrawablePadding = dp(6)
-            setPadding(dp(14), dp(7), dp(14), dp(7))
-            setOnClickListener {
-                startActivity(
-                    Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType("text/plain")
-                            .putExtra(Intent.EXTRA_TEXT, cur?.url ?: list[0].url),
-                        "مشاركة"
-                    )
-                )
-            }
-        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(4) })
-        head.addView(infoCol, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = dp(12); marginEnd = dp(26) })
-        root.addView(head)
-        outer.addView(iconBtn(R.drawable.ic_close, gray, 12).apply { setOnClickListener { dlg.dismiss() } },
-            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END))
-        if (poster.startsWith("http")) {
-            ThumbLoader.loadUrl(poster, headers) { b ->
-                if (b != null) {
-                    thumb.clearColorFilter()
-                    thumb.scaleType = ImageView.ScaleType.CENTER_CROP
-                    thumb.setImageBitmap(b)
-                }
-            }
-        }
-
-        val prow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val pv = TextView(this).apply {
-            text = pathText(); textSize = 12f; setTextColor(gray)
-            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-        }
-        pathView = pv
-        prow.addView(pv, LinearLayout.LayoutParams(0, WRAP, 1f))
-        prow.addView(TextView(this).apply {
-            text = "تغيير"; textSize = 13f; setTextColor(0xFF1565C0.toInt())
-            setPadding(dp(10), dp(8), dp(4), dp(8))
-            setOnClickListener { pickFolder.launch(null) }
-        })
-        root.addView(prow, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
-        root.addView(View(this).apply { setBackgroundColor(0xFFE8EAED.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
-
-        class RowRef(val rb: RadioButton, val lbl: TextView, val size: TextView, val f: Format)
-        var selected: Format? = null
-        val rowsRef = ArrayList<RowRef>()
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val tint = android.content.res.ColorStateList(
-            arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(red, 0xFF9E9E9E.toInt())
-        )
-        var rows = 0
-        var sections = 0
-        fun section(icon: Int, text: String) {
-            sections++
-            val h = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(4), dp(14), dp(4), dp(6))
-            }
-            h.addView(ImageView(this).apply { setImageResource(icon); setColorFilter(0xFF37474F.toInt()) }, LinearLayout.LayoutParams(dp(24), dp(24)))
-            h.addView(TextView(this).apply {
-                this.text = text; textSize = 17f; setTextColor(0xFF37474F.toInt())
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
-            }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) })
-            box.addView(h)
-        }
-        var playBtn: TextView? = null
-        fun isMedia(f: Format): Boolean {
-            val k = Util.kindOf("x." + f.ext)
-            return f.kind == "hls" || f.isAudio || k == "video" || k == "audio"
-        }
-        fun select(f: Format) {
-            selected = f
-            playBtn?.visibility = if (isMedia(f)) View.VISIBLE else View.GONE
-            for (r in rowsRef) {
-                val on = r.f === f
-                r.rb.isChecked = on
-                r.lbl.setTextColor(if (on) red else Color.BLACK)
-                r.size.setTextColor(if (on) red else gray)
-            }
-        }
-        fun row(f: Format) {
-            rows++
-            val rb = RadioButton(this).apply { isClickable = false; isFocusable = false; buttonTintList = tint }
-            val lbl = TextView(this).apply { text = f.label; textSize = 16f; setTextColor(Color.BLACK) }
-            val sz = TextView(this).apply { text = f.sizeText; textSize = 14f; setTextColor(gray) }
-            val r = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(2), dp(4), dp(2), dp(4))
-                setBackgroundResource(ripple())
-                setOnClickListener { select(f) }
-            }
-            r.addView(rb)
-            r.addView(lbl, LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = dp(6) })
-            if (f.kind == "direct" && !f.isAudio) {
-                r.addView(TextView(this).apply { text = f.ext.uppercase(); textSize = 12f; setTextColor(gray) },
-                    LinearLayout.LayoutParams(WRAP, WRAP).apply { marginEnd = dp(14) })
-            }
-            r.addView(sz)
-            rowsRef.add(RowRef(rb, lbl, sz, f))
-            box.addView(r, LinearLayout.LayoutParams(MATCH, dp(48)))
-            box.addView(View(this).apply { setBackgroundColor(0xFFF1F3F4.toInt()) }, LinearLayout.LayoutParams(MATCH, dp(1)))
-        }
-        val audio = list.filter { it.isAudio || Formats.isAudio(it.ext) }
-        val rest = list.filter { !(it.isAudio || Formats.isAudio(it.ext)) }
-        val video = rest.filter { it.kind == "hls" || Util.kindOf("x." + it.ext) == "video" }
-        val files = rest.filter { !(it.kind == "hls" || Util.kindOf("x." + it.ext) == "video") }
-        if (audio.isNotEmpty()) { section(R.drawable.ic_music, "الصوت"); audio.forEach { row(it) } }
-        if (video.isNotEmpty()) { section(R.drawable.ic_play_circle, "الفيديو"); video.forEach { row(it) } }
-        if (files.isNotEmpty()) {
-            val apk = files.any { Util.kindOf("x." + it.ext) == "apk" }
-            section(if (apk) R.drawable.ic_apk else R.drawable.ic_file, if (apk) "تطبيق" else "ملف")
-            files.forEach { row(it) }
-        }
-        (video.firstOrNull() ?: audio.firstOrNull() ?: files.firstOrNull())?.let { select(it) }
-        val rt0 = refreshTask()
-        if (rt0 != null && rt0.total > 0) {
-            list.filter { it.kind == rt0.kind && it.bytes > 0 }
-                .minByOrNull { Math.abs(it.bytes - rt0.total) }?.let { select(it) }
-        }
-
-        val sv = ScrollView(this)
-        sv.addView(box)
-        val maxH = (resources.displayMetrics.heightPixels * 0.40).toInt()
-        val wantH = rows * dp(50) + sections * dp(44) + dp(8)
-        root.addView(sv, LinearLayout.LayoutParams(MATCH, minOf(wantH, maxH)))
-
-        val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val pb = TextView(this).apply {
-            text = "تشغيل"
-            textSize = 16f
-            gravity = Gravity.CENTER
-            setTextColor(gray)
-            background = rounded(Color.WHITE, 6, 0xFFCFD8DC.toInt())
-            setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_play, 0, 0, 0)
-            compoundDrawableTintList = android.content.res.ColorStateList.valueOf(gray)
-            compoundDrawablePadding = dp(6)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setOnClickListener {
-                val f = selected
-                if (f != null) playPreview(f, headers, et.text.toString())
-            }
-        }
-        playBtn = pb
-        btns.addView(pb, LinearLayout.LayoutParams(0, WRAP, 1f))
-        selected?.let { pb.visibility = if (isMedia(it)) View.VISIBLE else View.GONE }
-        btns.addView(TextView(this).apply {
-            text = if (refreshTask() != null) "تحديث الرابط واستئناف" else "تحميل"
-            textSize = 16f
-            gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            background = rounded(red, 6)
-            setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_download, 0, 0, 0)
-            compoundDrawablePadding = dp(8)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setOnClickListener {
-                val f = selected
-                if (f != null) {
-                    dlg.dismiss()
-                    startDownload(f, et.text.toString(), headers, poster)
-                }
-            }
-        }, LinearLayout.LayoutParams(0, WRAP, 2f).apply { marginStart = dp(10) })
-        root.addView(btns, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(10) })
-
-        dlg.setContentView(outer)
-        dlg.setOnDismissListener { pathView = null }
-        dlg.behavior.state = BottomSheetBehavior.STATE_EXPANDED
-        dlg.show()
-    }
-
-    private fun startDownload(f: Format, n: String, headers: Map<String, String>, poster: String) {
-        val rt = refreshTask()
-        if (rt != null) {
-            if (rt.kind != f.kind) {
-                toast("نوع الرابط مختلف عن الملف الأصلي، اختر نفس الجودة")
-                return
-            }
-            DownloadCenter.replaceSource(rt, f.url, headers)
-            clearRefresh()
-            toast("تم تحديث الرابط واستئناف التحميل — تابعه من (التحميلات)")
+    private fun showFormatDialog(list: List<Format>, title: String, poster: String) {
+        if (list.isEmpty()) {
+            Toast.makeText(this, "لم يتم العثور على روابط فيديو", Toast.LENGTH_SHORT).show()
             return
         }
-        var name = Util.safeName(n)
-        if (!name.endsWith("." + f.ext, true)) name += "." + f.ext
-        val t = Task(UUID.randomUUID().toString(), f.url, name, f.kind, headers)
-        t.mime = Util.mimeOf(name)
-        t.thumbUrl = poster
-        DownloadCenter.add(t)
-        toast("بدأ التحميل — تابعه من زر (التحميلات)")
-    }
-
-    private fun addBookmark() {
-        val t = cur
-        if (t != null && t.url.startsWith("http")) {
-            val l = Store.entries(this, "bookmarks")
-            l.removeAll { it.url == t.url }
-            l.add(0, Store.Entry(t.title, t.url, System.currentTimeMillis()))
-            Store.putEntries(this, "bookmarks", l)
-            toast("تمت الإضافة إلى الإشارات المرجعية")
-        }
-    }
-
-    private fun showMenu(anchor: View) {
-        val dark = 0xFF37474F.toInt()
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
-        val pw = PopupWindow(this)
-        val col = LinearLayout(this).apply {
+        val headers = headersFor(cur!!)
+        val d = BottomSheetDialog(this)
+        val sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            background = rounded(Color.WHITE, 16, 0xFFE0E0E0.toInt())
-            setPadding(dp(6), dp(8), dp(6), dp(8))
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        val topRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        fun topBtn(res: Int, enabled: Boolean = true, onClick: () -> Unit) {
-            val b = iconBtn(res, dark, 11)
-            b.background = circle(0xFFF1F3F4.toInt())
-            b.alpha = if (enabled) 1f else 0.35f
-            b.setOnClickListener { if (enabled) { pw.dismiss(); onClick() } }
-            topRow.addView(b, LinearLayout.LayoutParams(dp(46), dp(46)).apply { setMargins(dp(4), dp(2), dp(4), dp(2)) })
+
+        val headerLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
         }
-        val t = cur
-        topBtn(R.drawable.ic_forward, t?.web?.canGoForward() == true) { cur?.web?.goForward() }
-        topBtn(R.drawable.ic_back, t?.web?.canGoBack() == true) { cur?.web?.goBack() }
-        topBtn(R.drawable.ic_star) { addBookmark() }
-        topBtn(R.drawable.ic_download) { startActivity(Intent(this, DownloadsActivity::class.java)) }
-        topBtn(R.drawable.ic_refresh) { cur?.web?.reload() }
-        col.addView(topRow)
+        val posterImg = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(Color.parseColor("#2C2C2C"))
+        }
+        val imgSize = dp(64)
+        headerLayout.addView(posterImg, LinearLayout.LayoutParams(imgSize, imgSize).apply { marginEnd = dp(12) })
 
-        fun line() = col.addView(View(this).apply { setBackgroundColor(0xFFE8EAED.toInt()) },
-            LinearLayout.LayoutParams(MATCH, dp(1)).apply { setMargins(dp(8), dp(6), dp(8), dp(6)) })
+        if (poster.isNotBlank()) {
+            ThumbLoader.loadUrl(poster, headers) { b ->
+                if (b != null) posterImg.setImageBitmap(b)
+            }
+        }
 
-        fun item(res: Int, text: String, mark: Boolean = false, onClick: () -> Unit) {
-            val r = LinearLayout(this).apply {
+        val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pathView = TextView(this).apply {
+            text = "المسار: " + (if (Uri.parse(Prefs.downloadDir(this@MainActivity)) == null) "Download/VideoBrowser" else (Uri.parse(Prefs.downloadDir(this@MainActivity)).lastPathSegment ?: "Download/VideoBrowser"))
+            textSize = 12f
+            setTextColor(Color.parseColor("#888888"))
+        }
+        val nameView = TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            maxLines = 2
+        }
+        titleCol.addView(pathView)
+        titleCol.addView(nameView)
+        headerLayout.addView(titleCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        sheet.addView(headerLayout)
+
+        val changeDirBtn = TextView(this).apply {
+            text = "تغيير"
+            textSize = 14f
+            setTextColor(Color.parseColor("#4CAF50"))
+            setPadding(0, dp(4), 0, dp(12))
+            setOnClickListener {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                startActivityForResult(intent, 999)
+            }
+        }
+        sheet.addView(changeDirBtn)
+
+        val scroll = ScrollView(this)
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        fun row(f: Format) {
+            val itemLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), 0, dp(12), 0)
-                setBackgroundResource(ripple())
-                setOnClickListener { pw.dismiss(); onClick() }
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setBackgroundColor(Color.parseColor("#252525"))
             }
-            r.addView(ImageView(this).apply { setImageResource(res); setColorFilter(dark) }, LinearLayout.LayoutParams(dp(22), dp(22)))
-            r.addView(TextView(this).apply { this.text = text; textSize = 15f; setTextColor(Color.BLACK) },
-                LinearLayout.LayoutParams(0, WRAP, 1f).apply { marginStart = dp(16) })
-            if (mark) r.addView(TextView(this).apply { this.text = "✓"; textSize = 16f; setTextColor(0xFF1565C0.toInt()) })
-            col.addView(r, LinearLayout.LayoutParams(MATCH, dp(48)))
+
+            val k = Util.kindOf("x." + f.ext)
+            val icon = ImageView(this).apply {
+                setImageResource(when (k) {
+                    "video" -> R.drawable.ic_video
+                    "audio" -> R.drawable.ic_music
+                    else -> R.drawable.ic_file
+                })
+            }
+            itemLayout.addView(icon, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(12) })
+
+            val desc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val l1 = TextView(this).apply {
+                text = f.label + (if (f.resolution.isNotBlank()) " (${f.resolution})" else "")
+                textSize = 15f
+                setTextColor(Color.WHITE)
+            }
+            val l2 = TextView(this).apply {
+                val parts = ArrayList<String>()
+                if (f.sizeStr.isNotBlank()) parts.add(f.sizeStr)
+                if (f.ext.isNotBlank()) parts.add(f.ext.uppercase())
+                text = parts.joinToString(" • ")
+                textSize = 12f
+                setTextColor(Color.parseColor("#AAAAAA"))
+            }
+            desc.addView(l1)
+            desc.addView(l2)
+            itemLayout.addView(desc, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+            val downBtn = Button(this).apply {
+                text = "تحميل"
+                setTextColor(Color.WHITE)
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.ic_download)
+                setBackgroundColor(Color.parseColor("#E50914"))
+                setOnClickListener {
+                    d.dismiss()
+                    val name = Util.sanitizeFilename(title) + "." + f.ext
+                    if (f.kind == "hls") {
+                        val rt = Task(UUID.randomUUID().toString(), f.url, name, f.kind, headers)
+                        rt.thumbUrl = poster
+                        DownloadCenter.start(this@MainActivity, rt)
+                    } else {
+                        DownloadCenter.start(this@MainActivity, Task(UUID.randomUUID().toString(), f.url, name, f.kind, headers))
+                    }
+                    val l = Store.entries(this@MainActivity, "history")
+                    l.removeAll { it.url == cur?.url }
+                    l.add(0, Store.Entry(title, cur?.url ?: f.url, System.currentTimeMillis()))
+                    Store.putEntries(this@MainActivity, "history", l)
+                }
+            }
+            itemLayout.addView(downBtn, LinearLayout.LayoutParams(dp(80), dp(36)).apply { marginStart = dp(8) })
+
+            val playBtn = Button(this).apply {
+                text = "تشغيل"
+                setTextColor(Color.BLACK)
+                setBackgroundColor(Color.parseColor("#E0E0E0"))
+                setOnClickListener {
+                    d.dismiss()
+                    val name = Util.sanitizeFilename(title) + "." + f.ext
+                    if (f.kind == "hls") {
+                        val rt = Task(UUID.randomUUID().toString(), f.url, name, f.kind, headers)
+                        rt.thumbUrl = poster
+                        DownloadCenter.replaceSource(rt, f.url, headers)
+                    }
+                    val i = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+                        putExtra("uri", f.url)
+                        putExtra("title", title)
+                        putExtra("headers", headers as java.io.Serializable)
+                    }
+                    startActivity(i)
+                }
+            }
+            itemLayout.addView(playBtn, LinearLayout.LayoutParams(dp(80), dp(36)).apply { marginStart = dp(8) })
+
+            container.addView(itemLayout)
+            val sp = View(this).apply { background = Color.parseColor("#333333").let { android.graphics.drawable.ColorDrawable(it) } }
+            container.addView(sp, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         }
 
-        line()
-        item(R.drawable.ic_add, "علامة تبويب جديدة") { newTab(Prefs.home(this)) }
-        item(R.drawable.ic_tabs, "علامات التبويب (" + tabs.size + ")") { showTabs() }
-        item(R.drawable.ic_home, "الصفحة الرئيسية") { cur?.web?.loadUrl(Prefs.home(this)) }
-        line()
-        item(R.drawable.ic_history, "السجل") { openList("history") }
-        item(R.drawable.ic_download, "عمليات التنزيل") { startActivity(Intent(this, DownloadsActivity::class.java)) }
-        item(R.drawable.ic_star, "الإشارات المرجعية") { openList("bookmarks") }
-        line()
-        item(R.drawable.ic_share, "مشاركة") {
-            startActivity(
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, cur?.url ?: ""),
-                    "مشاركة"
-                )
-            )
-        }
-        item(R.drawable.ic_copy, "نسخ الرابط") {
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("url", cur?.url ?: ""))
-            toast("تم نسخ الرابط")
-        }
-        item(R.drawable.ic_desktop, "وضع سطح المكتب", desktop) {
-            desktop = !desktop
-            tabs.forEach { applyUa(it.web) }
-            cur?.web?.reload()
-        }
-        line()
-        item(R.drawable.ic_settings, "الإعدادات") { startActivity(Intent(this, SettingsActivity::class.java)) }
+        val video = list.filter { it.kind == "hls" || Util.kindOf("x." + it.ext) == "video" }
+        val audio = list.filter { it.isAudio || Util.kindOf("x." + it.ext) == "audio" }
+        val rest = list.filter { !(it.kind == "hls" || Util.kindOf("x." + it.ext) == "video" || it.isAudio || Util.kindOf("x." + it.ext) == "audio") }
 
-        val sv = ScrollView(this)
-        sv.addView(col)
-        pw.contentView = sv
-        pw.width = dp(280)
-        pw.height = minOf(dp(600), (screenH * 0.85).toInt())
-        pw.isFocusable = true
-        pw.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        pw.elevation = dp(10).toFloat()
-        val loc = IntArray(2)
-        anchor.getLocationOnScreen(loc)
-        val x = loc[0].coerceIn(dp(8), maxOf(dp(8), screenW - dp(280) - dp(8)))
-        pw.showAtLocation(anchor.rootView, Gravity.TOP or Gravity.LEFT, x, loc[1])
+        if (video.isNotEmpty()) {
+            val tv = TextView(this).apply { text = "الفيديو"; setTextColor(Color.parseColor("#888888")); setPadding(0, dp(8), 0, dp(4)) }
+            container.addView(tv)
+            video.forEach { row(it) }
+        }
+        if (audio.isNotEmpty()) {
+            val tv = TextView(this).apply { text = "الصوت"; setTextColor(Color.parseColor("#888888")); setPadding(0, dp(8), 0, dp(4)) }
+            container.addView(tv)
+            audio.forEach { row(it) }
+        }
+        if (rest.isNotEmpty()) {
+            val tv = TextView(this).apply { text = "ملفات أخرى"; setTextColor(Color.parseColor("#888888")); setPadding(0, dp(8), 0, dp(4)) }
+            container.addView(tv)
+            rest.forEach { row(it) }
+        }
+
+        scroll.addView(container)
+        sheet.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(400)))
+        d.setContentView(sheet)
+        d.show()
+    }
+
+    private fun tabOf(w: WebView): Tab? = tabs.find { it.web === w }
+
+    private fun showTabsDialog() {
+        val d = BottomSheetDialog(this)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#1E1E1E"))
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(12))
+        }
+        val title = TextView(this).apply {
+            text = "علامات التبويب (${tabs.size})"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+        }
+        top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val addBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_add)
+            background = null
+            setOnClickListener {
+                d.dismiss()
+                newTab(Prefs.home(this@MainActivity))
+            }
+        }
+        top.addView(addBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+        sheet.addView(top)
+
+        val scroll = ScrollView(this)
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        for (t in tabs) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setBackgroundColor(if (t === cur) Color.parseColor("#333333") else Color.parseColor("#252525"))
+                setOnClickListener {
+                    d.dismiss()
+                    switchTab(t)
+                }
+            }
+
+            val tv = TextView(this).apply {
+                text = t.title.ifBlank { t.url }
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                maxLines = 1
+            }
+            row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+
+            val close = ImageButton(this).apply {
+                setImageResource(R.drawable.ic_close)
+                background = null
+                setOnClickListener {
+                    d.dismiss()
+                    closeTab(t)
+                }
+            }
+            row.addView(close, LinearLayout.LayoutParams(dp(32), dp(32)))
+
+            container.addView(row)
+            val sp = View(this).apply { background = Color.parseColor("#333333").let { android.graphics.drawable.ColorDrawable(it) } }
+            container.addView(sp, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+        }
+
+        scroll.addView(container)
+        sheet.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(300)))
+        d.setContentView(sheet)
+        d.show()
+    }
+
+    private fun showMoreMenu(v: View) {
+        val popup = PopupMenu(this, v)
+        popup.menu.add("الإعدادات")
+        popup.menu.add("السجل")
+        popup.menu.add("تحديث")
+        popup.menu.add("مشاركة الرابط")
+        popup.menu.add("نسخ الرابط")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.title) {
+                "الإعدادات" -> { startActivity(Intent(this, SettingsActivity::class.java)); true }
+                "السجل" -> { startActivity(Intent(this, HistoryActivity::class.java)); true }
+                "تحديث" -> { cur?.web?.reload(); true }
+                "مشاركة الرابط" -> {
+                    val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, cur?.url ?: "")
+                    startActivity(Intent.createChooser(i, "مشاركة"))
+                    true
+                }
+                "نسخ الرابط" -> {
+                    val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("url", cur?.url ?: ""))
+                    Toast.makeText(this, "تم النسخ", Toast.LENGTH_SHORT).show()
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
     }
 }

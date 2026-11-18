@@ -507,7 +507,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
                 val u = r.url.toString()
-                if ((MEDIA_REGEX.containsMatchIn(u) || u.contains("videoplayback")) && !Net.isAdOrPreview(u)) {
+                if ((MEDIA_REGEX.containsMatchIn(u) || u.contains("videoplayback") || u.contains(".m3u8")) && !Net.isAdOrPreview(u)) {
                     ui.post { tabOf(v)?.let { rec(it, u) } }
                 }
                 return null
@@ -668,8 +668,15 @@ class MainActivity : AppCompatActivity() {
             for (item in items) {
                 try { list.addAll(Formats.resolve(item, headers)) } catch (e: Exception) {}
             }
+            // تصفية دقيقة ومنع التكرار حسب الجودة (Resolution) مع ترتيب تنازلي من الأعلى للأقل
             val clean = list.filter { f -> !Net.isAdOrPreview(f.url) && (f.fromMaster || list.none { it.fromMaster && it.url == f.url }) }
-                .distinctBy { f -> f.url }
+                .distinctBy { f -> 
+                    val resKey = f.label.replace(Regex("[^0-9P]"), "").uppercase()
+                    if (resKey.isNotEmpty()) resKey else f.url
+                }
+                .sortedByDescending { f ->
+                    f.label.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+                }
             ui.post {
                 if (isFinishing) return@post
                 if (clean.isEmpty()) toast("تعذر جلب معلومات الفيديو") else showFormatSheet(clean, headers, title, poster)
